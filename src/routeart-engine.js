@@ -381,6 +381,143 @@ export async function fetchLoopRoute({ center, targetKm, seed = 1, points = LOOP
 }
 
 // ---------------------------------------------------------------------------
+// 3d. SUGGESTED SHAPES — scout the real street network instead of forcing a
+// shape onto it. No amount of waypoint-density tuning closes the gap between
+// "forced shape" and a shape that actually fits: real streets are rectilinear,
+// not smooth curves, so the fix isn't a better routing call, it's picking a
+// location (and rotation) that already has the shape latent in it, then
+// scoring how well each candidate actually traced against the real roads.
+// ---------------------------------------------------------------------------
+
+const SCOUT_ROTATIONS = [0, 60, 120];
+// Ring-sampled candidate centers around a pin, at increasing radius fractions.
+const CENTER_RING_FRACTIONS = [0.8];
+const CENTER_RING_COUNT = 4; // points per ring
+// Firing dozens of ORS requests via a single Promise.all triggers connection-level
+// rejection (surfaces in the browser as a generic CORS error, not a clean 429) —
+// live-tested against the real API. Small concurrent batches stay reliable.
+const SCOUT_CONCURRENCY = 5;
+
+async function mapWithConcurrency(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+// Resamples a closed lat/lng loop to n points evenly spaced by real distance
+// (not by index) — needed to fairly compare an evenly-curved ideal shape
+// against an unevenly-dense real road path point-for-point.
+export function resampleByArcLength(latlngs, n) {
+  const closed = (latlngs[0][0] === latlngs[latlngs.length - 1][0] && latlngs[0][1] === latlngs[latlngs.length - 1][1])
+    ? latlngs : latlngs.concat([latlngs[0]]);
+  const segLens = [];
+  let total = 0;
+  for (let i = 1; i < closed.length; i++) { const d = haversine(closed[i - 1], closed[i]); segLens.push(d); total += d; }
+  if (total === 0) return Array.from({ length: n }, () => closed[0]);
+  const step = total / n;
+  const out = [];
+  let segIdx = 0, segStart = 0;
+  for (let i = 0; i < n; i++) {
+    const target = i * step;
+    while (segIdx < segLens.length - 1 && segStart + segLens[segIdx] < target) { segStart += segLens[segIdx]; segIdx++; }
+    const segLen = segLens[segIdx] || 1e-9;
+    const t = Math.min(1, Math.max(0, (target - segStart) / segLen));
+    const a = closed[segIdx], b = closed[segIdx + 1];
+    out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+  }
+  return out;
+}
+
+// Empirically calibrated against live ORS results across all 6 library shapes
+// at 4 rotations each (Bank, London, 5km target): average deviation ranged
+// ~1.4% of target distance (a rotation that lines up with the street grid) to
+// ~16% (one that fights it) — this maps that range onto a 0-100 score.
+const FIT_DEV_PCT_FLOOR = 12; // deviation % at/above which score bottoms out at 0
+
+export function scoreShapeFit(idealLatlngs, snappedLatlngs) {
+  const n = 48;
+  const a = resampleByArcLength(idealLatlngs, n);
+  const b = resampleByArcLength(snappedLatlngs, n);
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += haversine(a[i], b[i]);
+  const avgDevM = sum / n;
+  const targetM = polylineDistanceKm(idealLatlngs) * 1000;
+  const devPct = targetM > 0 ? (avgDevM / targetM) * 100 : 100;
+  const score = Math.round(Math.max(0, Math.min(100, 100 * (1 - devPct / FIT_DEV_PCT_FLOOR))));
+  const tier = score >= 80 ? 'great' : score >= 50 ? 'good' : 'loose';
+  return { score, tier, avgDevM };
+}
+
+// Scores one shape at one rotation against a real center — the unit both
+// scoutCenters (one proxy shape) and scoutShapes (the full library) build on.
+async function scoutOne(shapeId, center, targetKm, rotationDeg) {
+  const shapePts = generateShape(shapeId);
+  const placed = placeShape({ points: shapePts, center, targetKm, rotationDeg });
+  const r = await fitRouteOrs(placed);
+  if (!r.snapped) return null;
+  const fit = scoreShapeFit(placed, r.latlngs);
+  return { shapeId, rotationDeg, center, latlngs: r.latlngs, distanceKm: r.distanceKm, ...fit };
+}
+
+function offsetLatLng([lat, lng], bearingDeg, distanceM) {
+  const R = 6371000;
+  const brng = bearingDeg * Math.PI / 180;
+  const lat1 = lat * Math.PI / 180, lng1 = lng * Math.PI / 180;
+  const lat2 = Math.asin(Math.sin(lat1) * Math.cos(distanceM / R) + Math.cos(lat1) * Math.sin(distanceM / R) * Math.cos(brng));
+  const lng2 = lng1 + Math.atan2(
+    Math.sin(brng) * Math.sin(distanceM / R) * Math.cos(lat1),
+    Math.cos(distanceM / R) - Math.sin(lat1) * Math.sin(lat2),
+  );
+  return [lat2 * 180 / Math.PI, lng2 * 180 / Math.PI];
+}
+
+// Phase A — is the pin itself a good canvas, or is there a better one nearby?
+// Ring-samples candidate centers out to radiusKm and scores each with a single
+// proxy shape (cheap relative to the full per-shape scan in scoutShapes).
+export async function scoutCenters({ pin, targetKm, radiusKm = 1.5, proxyShapeId = 'star' }) {
+  const candidates = [{ center: pin, offsetM: 0 }];
+  for (const frac of CENTER_RING_FRACTIONS) {
+    const ringRadiusM = radiusKm * 1000 * frac;
+    for (let i = 0; i < CENTER_RING_COUNT; i++) {
+      const bearing = (360 / CENTER_RING_COUNT) * i;
+      candidates.push({ center: offsetLatLng(pin, bearing, ringRadiusM), offsetM: ringRadiusM });
+    }
+  }
+
+  const results = await mapWithConcurrency(candidates, SCOUT_CONCURRENCY, ({ center, offsetM }) =>
+    scoutOne(proxyShapeId, center, targetKm, 0).then((r) => (r ? { ...r, offsetM } : null)));
+  const valid = results.filter(Boolean);
+  if (valid.length === 0) return { center: pin, offsetM: 0, score: 0 };
+  valid.sort((x, y) => y.score - x.score);
+  return valid[0];
+}
+
+// Phase B — at a chosen center, try every library shape at a spread of
+// rotations and return the best-fitting ones, ranked.
+export async function scoutShapes({ center, targetKm }) {
+  const combos = [];
+  for (const sh of SHAPES) {
+    for (const rot of SCOUT_ROTATIONS) combos.push([sh.id, rot]);
+  }
+  const results = await mapWithConcurrency(combos, SCOUT_CONCURRENCY, ([shapeId, rot]) => scoutOne(shapeId, center, targetKm, rot));
+  const valid = results.filter(Boolean);
+  // keep only each shape's best-scoring rotation, then rank shapes against each other
+  const bestPerShape = new Map();
+  for (const r of valid) {
+    const prev = bestPerShape.get(r.shapeId);
+    if (!prev || r.score > prev.score) bestPerShape.set(r.shapeId, r);
+  }
+  return Array.from(bestPerShape.values()).sort((a, b) => b.score - a.score);
+}
+
+// ---------------------------------------------------------------------------
 // 4. COMPLEXITY / FIDELITY
 // ---------------------------------------------------------------------------
 

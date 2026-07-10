@@ -12,6 +12,12 @@ const COMPLEXITY_COPY = {
   'too-complex': { color: '#e8623d', title: 'Too intricate', msg: (c, km) => `Only ~${c.avgSegM} m between turns for ${km.toFixed(1)} km. Increase distance or pick a simpler shape.` },
 };
 
+const FIT_TIER_COPY = {
+  great: { color: '#2fd897', label: 'Great fit' },
+  good: { color: '#e8a94a', label: 'Good fit' },
+  loose: { color: '#e8623d', label: 'Loose fit' },
+};
+
 export default class App extends Component {
   state = {
     ready: false,
@@ -20,7 +26,7 @@ export default class App extends Component {
     searching: false,
     results: [],
     distanceKm: 5,
-    routeMode: 'loop', // 'loop' | 'shape'
+    routeMode: 'suggested', // 'suggested' | 'loop' | 'custom'
     shapeId: 'heart',
     customPoints: null,
     customName: '',
@@ -43,6 +49,11 @@ export default class App extends Component {
     editedRoute: null, // { latlngs, distanceKm } — set after dragging a point on the line
     editStatus: 'idle', // 'idle' | 'loading' | 'ok' | 'error'
     editError: '',
+    suggestedResults: [], // [{ shapeId, rotationDeg, center, latlngs, distanceKm, score, tier, avgDevM }]
+    suggestedStatus: 'idle', // 'idle' | 'scouting' | 'ok' | 'error'
+    suggestedCenter: null, // { center, offsetM } — the scouted center results are drawn from
+    suggestedActiveIndex: 0, // which card is currently previewed on the map
+    searchRadiusKm: 1.5,
     savedRoutesOpen: false,
     sheetExpanded: false,
     savedRoutes: savedRoutesStore.loadSavedRoutes(),
@@ -53,6 +64,8 @@ export default class App extends Component {
   _loopGen = 0;
   _loopDebounce = null;
   _editGen = 0;
+  _suggestGen = 0;
+  _suggestDebounce = null;
   _locationTouchedByUser = false;
 
   componentDidMount() {
@@ -66,6 +79,7 @@ export default class App extends Component {
     clearTimeout(this._toastT);
     clearTimeout(this._snapDebounce);
     clearTimeout(this._loopDebounce);
+    clearTimeout(this._suggestDebounce);
     if (this.map) { this.map.remove(); this.map = null; }
   }
 
@@ -101,8 +115,9 @@ export default class App extends Component {
     if (!this.map) {
       this.ensureMap();
       this.updateRoute(true);
-      if (s.routeMode === 'shape' && s.snapToRoads) this.requestSnap();
+      if (s.routeMode === 'custom' && s.snapToRoads) this.requestSnap();
       if (s.routeMode === 'loop') this.requestLoop();
+      if (s.routeMode === 'suggested') this.requestSuggestions();
       return;
     }
 
@@ -114,7 +129,22 @@ export default class App extends Component {
 
     const modeSwitched = ps.routeMode !== s.routeMode;
 
-    if (s.routeMode === 'shape' && !s.loadedRoute && !s.editedRoute) {
+    if (s.routeMode === 'suggested' && !s.loadedRoute && !s.editedRoute) {
+      const resultsRefChanged = ps.suggestedResults !== s.suggestedResults;
+      const activeChanged = ps.suggestedActiveIndex !== s.suggestedActiveIndex;
+      const recenter = modeSwitched || resultsRefChanged;
+      if (modeSwitched || resultsRefChanged || activeChanged) this.updateRoute(recenter);
+
+      const suggestKeys = ['location', 'distanceKm'];
+      const suggestInputsChanged = suggestKeys.some((k) => ps[k] !== s[k]);
+      if (suggestInputsChanged || (modeSwitched && s.suggestedStatus === 'idle')) {
+        clearTimeout(this._suggestDebounce);
+        if (modeSwitched && s.suggestedStatus === 'idle') this.requestSuggestions();
+        else this._suggestDebounce = setTimeout(() => this.requestSuggestions(), 500);
+      }
+    }
+
+    if (s.routeMode === 'custom' && !s.loadedRoute && !s.editedRoute) {
       const recenterKeys = ['shapeId', 'customPoints', 'distanceKm'];
       let recenter = recenterKeys.some((k) => ps[k] !== s[k]) || modeSwitched;
       if (this._recenterNext) { recenter = true; this._recenterNext = false; }
@@ -185,6 +215,52 @@ export default class App extends Component {
     this.setState({ loopSeed: Math.floor(Math.random() * 1e6) }, () => this.requestLoop());
   }
 
+  async requestSuggestions() {
+    this.setState({ suggestedStatus: 'scouting' });
+    const myGen = ++this._suggestGen;
+    const s = this.state;
+    const pin = [s.location.lat, s.location.lng];
+    const centerResult = await engine.scoutCenters({ pin, targetKm: s.distanceKm, radiusKm: s.searchRadiusKm });
+    if (myGen !== this._suggestGen) return;
+    const shapeResults = await engine.scoutShapes({ center: centerResult.center, targetKm: s.distanceKm });
+    if (myGen !== this._suggestGen) return;
+    this.setState({
+      suggestedStatus: shapeResults.length ? 'ok' : 'error',
+      suggestedResults: shapeResults.slice(0, 3),
+      suggestedCenter: centerResult,
+      suggestedActiveIndex: 0,
+    });
+  }
+
+  searchWider() {
+    clearTimeout(this._suggestDebounce);
+    this.setState({ searchRadiusKm: 5 }, () => this.requestSuggestions());
+  }
+
+  previewSuggestion(index) {
+    this.setState({ suggestedActiveIndex: index });
+  }
+
+  bumpDistance(delta) {
+    this.setState((s) => ({
+      distanceKm: Math.max(2, Math.min(50, +(s.distanceKm + delta).toFixed(1))),
+      loadedRoute: null, editedRoute: null,
+    }));
+  }
+
+  selectSuggestion(result) {
+    this._recenterNext = true;
+    this.setState({
+      routeMode: 'custom',
+      shapeId: result.shapeId,
+      rotationDeg: result.rotationDeg,
+      scale: 1,
+      location: { ...this.state.location, lat: result.center[0], lng: result.center[1] },
+      loadedRoute: null,
+      editedRoute: null,
+    });
+  }
+
   buildActiveRoute(baseRoute) {
     const s = this.state;
     const useSnap = s.snapToRoads && s.snapStatus === 'ok' && s.snappedRoute;
@@ -212,6 +288,13 @@ export default class App extends Component {
     return { latlngs: s.loopRoute.latlngs, distKm: s.loopRoute.distanceKm, points: null, comp: null };
   }
 
+  computeSuggestedRoute() {
+    const s = this.state;
+    const r = s.suggestedResults[s.suggestedActiveIndex];
+    if (!r) return null; // scan still in flight, or nothing found
+    return { latlngs: r.latlngs, distKm: r.distanceKm, points: null, comp: null };
+  }
+
   getCurrentRoute() {
     const s = this.state;
     if (s.editedRoute) {
@@ -223,6 +306,7 @@ export default class App extends Component {
       return { latlngs: r.latlngs, distKm: r.distanceKm, points: null, comp: null };
     }
     if (s.routeMode === 'loop') return this.computeLoopRoute();
+    if (s.routeMode === 'suggested') return this.computeSuggestedRoute();
     return this.buildActiveRoute(this.computeShapeRoute());
   }
 
@@ -501,7 +585,7 @@ export default class App extends Component {
       paceMinPerKm: s.paceMinPerKm,
       locationName: s.location.name,
       createdAt: Date.now(),
-      shapeName: s.routeMode === 'shape' ? this.currentName() : null,
+      shapeName: s.routeMode === 'custom' ? this.currentName() : null,
     };
     const next = savedRoutesStore.saveRoute(s.savedRoutes, record);
     this.setState({ savedRoutes: next, loadedRoute: record, editedRoute: null });
@@ -528,6 +612,11 @@ export default class App extends Component {
     const s = this.state;
     if (s.loadedRoute) return this.titleCase(s.loadedRoute.shapeName || s.loadedRoute.name);
     if (s.routeMode === 'loop') return 'Loop';
+    if (s.routeMode === 'suggested') {
+      const r = s.suggestedResults[s.suggestedActiveIndex];
+      const sh = r && engine.SHAPES.find((x) => x.id === r.shapeId);
+      return sh ? sh.name : 'Route';
+    }
     if (s.shapeId === 'custom') return this.titleCase(s.customName || 'Custom shape');
     const sh = engine.SHAPES.find((x) => x.id === s.shapeId);
     return sh ? sh.name : 'Route';
@@ -568,7 +657,7 @@ export default class App extends Component {
       });
     }
 
-    const comp = (s.routeMode === 'shape' && cur && cur.comp) ? cur.comp : null;
+    const comp = (s.routeMode === 'custom' && cur && cur.comp) ? cur.comp : null;
     const cc = comp ? COMPLEXITY_COPY[comp.level] : null;
     const complexColor = cc ? cc.color : null;
     const complexMsg = cc ? cc.msg(comp, s.distanceKm * s.scale) : '';
@@ -600,6 +689,12 @@ export default class App extends Component {
       if (s.loopStatus === 'loading') { modeStatusText = 'Finding a loop…'; modeStatusTone = 'loading'; }
       else if (s.loopStatus === 'ok' && s.loopRoute) { modeStatusText = `Loop found — ${s.loopRoute.distanceKm.toFixed(1)} km on real streets.`; modeStatusTone = 'ok'; }
       else if (s.loopStatus === 'error') { modeStatusText = `${s.loopError} Showing an approximate circular loop instead.`; modeStatusTone = 'warn'; }
+    } else if (s.routeMode === 'suggested') {
+      if (s.suggestedStatus === 'scouting') { modeStatusText = 'Scouting nearby streets…'; modeStatusTone = 'loading'; }
+      else if (s.suggestedStatus === 'ok' && s.suggestedResults.length) {
+        modeStatusText = `Found ${s.suggestedResults.length} good fit${s.suggestedResults.length === 1 ? '' : 's'} nearby.`;
+        modeStatusTone = 'ok';
+      } else if (s.suggestedStatus === 'error') { modeStatusText = 'Nothing fit well nearby — try Search wider.'; modeStatusTone = 'warn'; }
     } else if (s.snapToRoads) {
       if (s.snapStatus === 'loading') { modeStatusText = 'Following real streets…'; modeStatusTone = 'loading'; }
       else if (s.snapStatus === 'ok' && s.snappedRoute) {
@@ -637,40 +732,133 @@ export default class App extends Component {
         </header>
 
         <div className="ra-hud-row">
-          <div className="ra-hud-chip">{statDistance} <span>km</span></div>
           <div className="ra-hud-chip ra-hud-chip--muted">Drag the pin to reposition</div>
         </div>
 
-        <div className={`ra-sheet${s.sheetExpanded ? ' ra-sheet--expanded' : ''}`}>
-          <div className="ra-sheet-collapsed" onClick={() => this.setState((s2) => ({ sheetExpanded: !s2.sheetExpanded }))}>
-            <div className="ra-mode-toggle" onClick={(e) => e.stopPropagation()}>
-              <button type="button" className={`ra-mode-btn${s.routeMode === 'loop' ? ' ra-mode-btn--selected' : ''}`} onClick={() => this.setState({ routeMode: 'loop', loadedRoute: null, editedRoute: null })}>Loop</button>
-              <button type="button" className={`ra-mode-btn${s.routeMode === 'shape' ? ' ra-mode-btn--selected' : ''}`} onClick={() => this.setState({ routeMode: 'shape', loadedRoute: null, editedRoute: null })}>Shape</button>
-            </div>
-            <div className="ra-mono ra-sheet-stat">{statDistance} km · {statTime}</div>
-            <button
-              type="button"
-              className="ra-quick-export"
-              disabled={!this.route}
-              onClick={(e) => { e.stopPropagation(); this.downloadGpx(); }}
-              aria-label="Download GPX"
-              title="Download GPX"
-            >↓</button>
-            <div className="ra-sheet-grip"></div>
+        {/* Always-visible chrome: mode + distance. No tap required to see or use these. */}
+        <div className="ra-control-strip">
+          <div className="ra-mode-toggle">
+            <button type="button" className={`ra-mode-btn${s.routeMode === 'suggested' ? ' ra-mode-btn--selected' : ''}`} onClick={() => this.setState({ routeMode: 'suggested', loadedRoute: null, editedRoute: null })}>Suggested</button>
+            <button type="button" className={`ra-mode-btn${s.routeMode === 'loop' ? ' ra-mode-btn--selected' : ''}`} onClick={() => this.setState({ routeMode: 'loop', loadedRoute: null, editedRoute: null })}>Loop</button>
+            <button type="button" className={`ra-mode-btn${s.routeMode === 'custom' ? ' ra-mode-btn--selected' : ''}`} onClick={() => this.setState({ routeMode: 'custom', loadedRoute: null, editedRoute: null })}>Custom</button>
           </div>
+          <div className="ra-distance-stepper">
+            <button type="button" onClick={() => this.bumpDistance(-0.5)} aria-label="Decrease distance">–</button>
+            <span className="ra-mono">{statDistance} km</span>
+            <button type="button" onClick={() => this.bumpDistance(0.5)} aria-label="Increase distance">+</button>
+          </div>
+          <button
+            type="button"
+            className="ra-quick-export"
+            disabled={!this.route}
+            onClick={() => this.downloadGpx()}
+            aria-label="Download GPX"
+            title="Download GPX"
+          >↓</button>
+        </div>
 
-          {s.sheetExpanded && (
-            <div className="ra-sheet-body">
+        {/* Always-visible primary content: this is the whole point of the app,
+            so it's on screen by default, not behind a tap. */}
+        <div className="ra-result-strip">
+          {modeStatusText && (
+            <div className={`ra-status ra-status--${modeStatusTone} ra-status--floating`}>
+              {modeStatusTone === 'loading' && <span className="ra-spin ra-spin-lt"></span>}
+              <span>{modeStatusText}</span>
+            </div>
+          )}
 
-              {modeStatusText && (
-                <div className={`ra-status ra-status--${modeStatusTone}`}>
-                  {modeStatusTone === 'loading' && <span className="ra-spin ra-spin-lt"></span>}
-                  <span>{modeStatusText}</span>
+          {s.routeMode === 'suggested' && (
+            <div className="ra-result-cards">
+              {s.suggestedStatus === 'scouting' && s.suggestedResults.length === 0 && (
+                <div className="ra-result-card ra-result-card--status">
+                  <span className="ra-spin"></span>
+                  <span>Scouting nearby streets…</span>
                 </div>
               )}
+              {s.suggestedStatus === 'error' && (
+                <div className="ra-result-card ra-result-card--status">
+                  <span>Nothing fit well nearby.</span>
+                  <button type="button" className="ra-btn ra-btn-ghost" onClick={() => this.searchWider()}>Search wider</button>
+                </div>
+              )}
+              {s.suggestedResults.map((r, i) => {
+                const tier = FIT_TIER_COPY[r.tier];
+                const active = i === s.suggestedActiveIndex;
+                const sh = engine.SHAPES.find((x) => x.id === r.shapeId);
+                return (
+                  <div key={r.shapeId} className={`ra-result-card${active ? ' ra-result-card--active' : ''}`} onClick={() => this.previewSuggestion(i)}>
+                    <svg viewBox="0 0 100 100" className="ra-result-preview">
+                      <path d={engine.toSvgPathFromLatLngs(r.latlngs, 100, 12)} fill="none" stroke={tier.color} strokeWidth="4" strokeLinejoin="round" strokeLinecap="round"></path>
+                    </svg>
+                    <div className="ra-result-info">
+                      <div className="ra-result-name">{sh ? sh.name : r.shapeId}</div>
+                      <div className="ra-result-meta">
+                        <span style={{ color: tier.color }}>{tier.label}</span>
+                        <span> · {r.distanceKm.toFixed(1)} km</span>
+                      </div>
+                      {s.suggestedCenter && s.suggestedCenter.offsetM > 50 && (
+                        <div className="ra-result-offset">{Math.round(s.suggestedCenter.offsetM)}m from your pin</div>
+                      )}
+                    </div>
+                    <button type="button" className="ra-btn ra-btn-fill ra-result-use" onClick={(e) => { e.stopPropagation(); this.selectSuggestion(r); }}>Use this route</button>
+                  </div>
+                );
+              })}
+              {s.suggestedStatus === 'ok' && (
+                <button type="button" className="ra-result-wider" onClick={() => this.searchWider()}>Search wider</button>
+              )}
+            </div>
+          )}
 
-              {/* Share + export — this is the whole point of the app, so it comes
-                  first, not after five sections of configuration. */}
+          {s.routeMode === 'loop' && (
+            <div className="ra-result-cards">
+              <div className="ra-result-card ra-result-card--single ra-result-card--active">
+                <svg viewBox="0 0 100 100" className="ra-result-preview">
+                  <path d={cur ? engine.toSvgPathFromLatLngs(cur.latlngs, 100, 12) : ''} fill="none" stroke={TURF} strokeWidth="4" strokeLinejoin="round" strokeLinecap="round"></path>
+                </svg>
+                <div className="ra-result-info">
+                  <div className="ra-result-name">Loop</div>
+                  <div className="ra-result-meta">{statDistance} km</div>
+                </div>
+                <button type="button" className="ra-btn ra-btn-ghost ra-result-use" onClick={() => this.shuffleLoop()}>
+                  {s.loopStatus === 'loading' && <span className="ra-spin ra-spin-lt"></span>}
+                  <span>Shuffle</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {s.routeMode === 'custom' && (
+            <div className="ra-result-cards">
+              <div className="ra-result-card ra-result-card--single ra-result-card--active">
+                <svg viewBox="0 0 100 100" className="ra-result-preview">
+                  <path d={cur ? engine.toSvgPathFromLatLngs(cur.latlngs, 100, 12) : ''} fill="none" stroke={TURF} strokeWidth="4" strokeLinejoin="round" strokeLinecap="round"></path>
+                </svg>
+                <div className="ra-result-info">
+                  <div className="ra-result-name">{this.currentName()}</div>
+                  <div className="ra-result-meta">{statDistance} km</div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {!s.sheetExpanded && (
+          <button type="button" className="ra-finetune-toggle" onClick={() => this.setState({ sheetExpanded: true })}>
+            <span>Fine-tune</span>
+            <span className="ra-finetune-chevron">⌄</span>
+          </button>
+        )}
+
+        {s.sheetExpanded && (
+          <div className="ra-sheet ra-sheet--expanded">
+            <div className="ra-sheet-grip-bar" onClick={() => this.setState({ sheetExpanded: false })}>
+              <div className="ra-sheet-grip"></div>
+            </div>
+            <div className="ra-sheet-body">
+
+              {/* Share + export — kept at the top of the panel: even inside
+                  Fine-tune, this shouldn't be the last thing you find. */}
               <div className="ra-actions">
                 <div className="ra-share-card">
                   <button type="button" className="ra-share-action" onClick={() => this.shareImage()} title="Share as image">⤴</button>
@@ -724,7 +912,8 @@ export default class App extends Component {
                 </div>
               </div>
 
-              {/* Distance & Pace */}
+              {/* Distance & Pace — quick nudges live in the control strip above;
+                  this is for dialing in an exact number. */}
               <div className="ra-sheet-section">
                 <div className="ra-value-row">
                   <div className="ra-field-label">Target distance</div>
@@ -743,15 +932,19 @@ export default class App extends Component {
                 </div>
               </div>
 
-              {/* Mode body */}
-              {s.routeMode === 'loop' ? (
+              {/* Suggested: search radius */}
+              {s.routeMode === 'suggested' && (
                 <div className="ra-sheet-section">
-                  <button type="button" className="ra-btn ra-btn-ghost" style={{ width: '100%', height: 44 }} onClick={() => this.shuffleLoop()}>
-                    {s.loopStatus === 'loading' && <span className="ra-spin ra-spin-lt"></span>}
-                    <span>Shuffle loop</span>
-                  </button>
+                  <div className="ra-value-row">
+                    <div className="ra-field-label">Search radius</div>
+                    <div className="ra-mono ra-value" style={{ fontSize: 20 }}>{s.searchRadiusKm.toFixed(1)} km</div>
+                  </div>
+                  <button type="button" className="ra-btn ra-btn-ghost" style={{ width: '100%', height: 44 }} onClick={() => this.searchWider()}>Search wider</button>
                 </div>
-              ) : (
+              )}
+
+              {/* Custom: shape grid + AI prompt + fine controls */}
+              {s.routeMode === 'custom' && (
                 <div className="ra-sheet-section">
                   <div className="ra-field-label">Shape</div>
                   <div className="ra-shape-grid">
@@ -833,8 +1026,8 @@ export default class App extends Component {
               </div>
 
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
         {s.savedRoutesOpen && (
           <div className="ra-modal-overlay" onClick={() => this.setState({ savedRoutesOpen: false })}>
