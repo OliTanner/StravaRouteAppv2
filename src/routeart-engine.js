@@ -221,8 +221,13 @@ async function callOrsRoute(wps, { radius = SNAP_RADIUS_M } = {}) {
     return { error: 'No OpenRouteService API key configured — set VITE_ORS_API_KEY in .env.local.' };
   }
 
-  const coordinates = wps.map(([lat, lng]) => [lng, lat]);
-  const radiuses = wps.map(() => radius);
+  // ORS routes through waypoints in order but never loops back to the start on
+  // its own — re-sending the first point as the final stop makes ORS actually
+  // route the closing leg over real roads, instead of us drawing a straight
+  // line from the last point back to the first afterward.
+  const routeWps = wps.concat([wps[0]]);
+  const coordinates = routeWps.map(([lat, lng]) => [lng, lat]);
+  const radiuses = routeWps.map(() => radius);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ORS_FETCH_TIMEOUT_MS);
@@ -247,9 +252,8 @@ async function callOrsRoute(wps, { radius = SNAP_RADIUS_M } = {}) {
 
   const feature = data.features[0];
   const snapped = feature.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
-  const closed = snapped.concat([snapped[0]]); // re-close the loop for drawing/GPX
   const distanceKm = feature.properties.summary.distance / 1000;
-  return { latlngs: closed, distanceKm };
+  return { latlngs: snapped, distanceKm }; // already closed — ORS routed the full loop, including the return leg
 }
 
 async function fitRouteOrs(latlngs) {
