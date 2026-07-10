@@ -117,7 +117,17 @@ export default class App extends Component {
       this.updateRoute(true);
       if (s.routeMode === 'custom' && s.snapToRoads) this.requestSnap();
       if (s.routeMode === 'loop') this.requestLoop();
-      if (s.routeMode === 'suggested') this.requestSuggestions();
+      if (s.routeMode === 'suggested') {
+        // Geolocation often resolves within a few hundred ms when permission is
+        // already granted — wait briefly so we scan the real location once,
+        // instead of scanning the placeholder default and then immediately
+        // re-scanning the real location once geolocation lands. That double
+        // scan was ~46 ORS calls within a second of page load, comfortably
+        // tripping the 40/min rate limit on a fresh visit. Shares the same
+        // debounce timer as location/distance changes below, so if geolocation
+        // does resolve first, that handler's clearTimeout cancels this one.
+        this._suggestDebounce = setTimeout(() => this.requestSuggestions(), 700);
+      }
       return;
     }
 
