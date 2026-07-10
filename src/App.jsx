@@ -437,6 +437,58 @@ export default class App extends Component {
     this.flash('GPX downloaded — ready for your watch');
   }
 
+  escapeXml(str) {
+    return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
+  }
+
+  // Renders the on-screen share card to a real PNG and hands it to the OS share
+  // sheet (or downloads it) — the card previously just sat there looking
+  // shareable with no way to actually get it off the device.
+  async shareImage() {
+    if (!this._shareData) return;
+    const { path, title, meta } = this._shareData;
+    const w = 400, h = 210;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">
+      <rect width="${w}" height="${h}" fill="#0d0f0b"/>
+      <path d="${path}" fill="none" stroke="#2fd897" stroke-width="6" stroke-linejoin="round" stroke-linecap="round" opacity="0.28"/>
+      <path d="${path}" fill="none" stroke="#2fd897" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/>
+      <text x="18" y="${h - 34}" fill="#f4f2ea" font-family="Georgia, serif" font-size="20" font-weight="700">${this.escapeXml(title)}</text>
+      <text x="18" y="${h - 14}" fill="#9a9c8f" font-family="Barlow, sans-serif" font-size="12">${this.escapeXml(meta)}</text>
+    </svg>`;
+
+    try {
+      const svgUrl = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+      const img = new Image();
+      const loaded = new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; });
+      img.src = svgUrl;
+      await loaded;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = w * 2; canvas.height = h * 2;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(2, 2);
+      ctx.drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(svgUrl);
+
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+      const file = new File([blob], 'routeart-share.png', { type: 'image/png' });
+
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title, text: 'Made with RouteArt' });
+        this.flash('Shared');
+      } else {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'routeart-share.png';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        this.flash('Image downloaded — ready to share');
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError') this.flash('Could not create the share image');
+    }
+  }
+
   saveCurrentRoute() {
     if (!this.route) return;
     const s = this.state;
@@ -533,6 +585,8 @@ export default class App extends Component {
     const statPace = this.fmtPace(s.paceMinPerKm);
     const locationShort = (s.location.name || '').split(',')[0];
     const shareTitle = `${this.currentName()} — GPS Art`;
+    const shareMeta = `${now.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · ${locationShort}`;
+    this._shareData = cur ? { path: sharePath, title: shareTitle, meta: shareMeta } : null;
 
     let modeStatusText = '';
     let modeStatusTone = 'ok';
@@ -594,6 +648,14 @@ export default class App extends Component {
               <button type="button" className={`ra-mode-btn${s.routeMode === 'shape' ? ' ra-mode-btn--selected' : ''}`} onClick={() => this.setState({ routeMode: 'shape', loadedRoute: null, editedRoute: null })}>Shape</button>
             </div>
             <div className="ra-mono ra-sheet-stat">{statDistance} km · {statTime}</div>
+            <button
+              type="button"
+              className="ra-quick-export"
+              disabled={!this.route}
+              onClick={(e) => { e.stopPropagation(); this.downloadGpx(); }}
+              aria-label="Download GPX"
+              title="Download GPX"
+            >↓</button>
             <div className="ra-sheet-grip"></div>
           </div>
 
@@ -606,6 +668,37 @@ export default class App extends Component {
                   <span>{modeStatusText}</span>
                 </div>
               )}
+
+              {/* Share + export — this is the whole point of the app, so it comes
+                  first, not after five sections of configuration. */}
+              <div className="ra-actions">
+                <div className="ra-share-card">
+                  <button type="button" className="ra-share-action" onClick={() => this.shareImage()} title="Share as image">⤴</button>
+                  <div className="ra-share-head">
+                    <div className="ra-mono ra-share-avatar">YR</div>
+                    <div style={{ minWidth: 0 }}>
+                      <div className="ra-share-name">Your Run</div>
+                      <div className="ra-share-meta">{shareMeta}</div>
+                    </div>
+                  </div>
+                  <div className="ra-mono ra-share-title">{shareTitle}</div>
+                  <div className="ra-share-map">
+                    <svg viewBox="0 0 400 210" style={{ width: '100%', display: 'block' }}>
+                      <rect x="0" y="0" width="400" height="210" fill="var(--ink-950)"></rect>
+                      <path d={sharePath} fill="none" stroke="var(--turf)" strokeWidth="5" strokeLinejoin="round" strokeLinecap="round" opacity="0.28" style={{ filter: 'blur(3px)' }}></path>
+                      <path d={sharePath} fill="none" stroke="var(--turf)" strokeWidth="3.5" strokeLinejoin="round" strokeLinecap="round"></path>
+                    </svg>
+                  </div>
+                </div>
+
+                <div className="ra-export">
+                  <button type="button" className="ra-btn ra-btn-fill ra-export-primary" onClick={() => this.downloadGpx()}>
+                    <span style={{ fontSize: 17 }}>↓</span> Download GPX
+                  </button>
+                  <button type="button" className="ra-btn ra-btn-ghost ra-export-secondary" onClick={() => this.saveCurrentRoute()}>Save Route</button>
+                  <div className="ra-export-note">Load the GPX into Strava, Garmin or Komoot to run it for real.</div>
+                </div>
+              </div>
 
               {/* Start */}
               <div className="ra-sheet-section">
@@ -736,35 +829,6 @@ export default class App extends Component {
                 <div className="ra-split">
                   <div className="ra-split-label">Pace</div>
                   <div className="ra-mono ra-split-value">{statPace}<span className="ra-split-unit"> /km</span></div>
-                </div>
-              </div>
-
-              {/* Share + export */}
-              <div className="ra-actions">
-                <div className="ra-share-card">
-                  <div className="ra-share-head">
-                    <div className="ra-mono ra-share-avatar">YR</div>
-                    <div style={{ minWidth: 0 }}>
-                      <div className="ra-share-name">Your Run</div>
-                      <div className="ra-share-meta">{now.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · {locationShort}</div>
-                    </div>
-                  </div>
-                  <div className="ra-mono ra-share-title">{shareTitle}</div>
-                  <div className="ra-share-map">
-                    <svg viewBox="0 0 400 210" style={{ width: '100%', display: 'block' }}>
-                      <rect x="0" y="0" width="400" height="210" fill="var(--ink-950)"></rect>
-                      <path d={sharePath} fill="none" stroke="var(--turf)" strokeWidth="5" strokeLinejoin="round" strokeLinecap="round" opacity="0.28" style={{ filter: 'blur(3px)' }}></path>
-                      <path d={sharePath} fill="none" stroke="var(--turf)" strokeWidth="3.5" strokeLinejoin="round" strokeLinecap="round"></path>
-                    </svg>
-                  </div>
-                </div>
-
-                <div className="ra-export">
-                  <button type="button" className="ra-btn ra-btn-fill ra-export-primary" onClick={() => this.downloadGpx()}>
-                    <span style={{ fontSize: 17 }}>↓</span> Download GPX
-                  </button>
-                  <button type="button" className="ra-btn ra-btn-ghost ra-export-secondary" onClick={() => this.saveCurrentRoute()}>Save Route</button>
-                  <div className="ra-export-note">Load the GPX into Strava, Garmin or Komoot to run it for real.</div>
                 </div>
               </div>
 
