@@ -43,31 +43,44 @@ const TREE_HALF = [
   [0.42, 0.08], [0.12, 0.08], [0.12, -0.16], [0.12, -0.42], [0, -0.42],
 ];
 
-const GUITAR_HALF = [
-  [0.05, 1.0], [0.09, 0.93], [0.05, 0.88], [0.045, 0.52], [0.06, 0.36],
-  [0.22, 0.29], [0.29, 0.13], [0.2, 0.0], [0.3, -0.15], [0.35, -0.42],
-  [0.21, -0.63], [0, -0.68],
+// Letter outlines: a single continuous stroke (no holes), so "O" is a ring
+// silhouette rather than a true glyph with an interior — fine for a running
+// route, which can't trace a hole anyway. O and T are left-right symmetric
+// (mirrorHalf); J isn't, so it's given as a full outline.
+
+function sampleLetterO(n = 48) {
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * TAU;
+    pts.push([0.42 * Math.cos(a), 0.5 * Math.sin(a)]);
+  }
+  return pts;
+}
+
+const T_HALF = [
+  [0, 0.5], [0.5, 0.5], [0.5, 0.3], [0.1, 0.3], [0.1, -0.5], [0, -0.5],
 ];
 
-const BUTTERFLY_HALF = [
-  [0, 0.95], [0.34, 0.98], [0.62, 0.78], [0.56, 0.44], [0.16, 0.16],
-  [0.46, -0.06], [0.5, -0.46], [0.3, -0.78], [0.1, -0.86], [0, -0.66],
+const J_FULL = [
+  [0.1, 0.5], [0.3, 0.5], [0.3, -0.4], [-0.3, -0.4], [-0.3, -0.2], [0.1, -0.2],
 ];
 
 const RAW = {
   heart: sampleHeart,
   star: () => sampleStar(5),
   tree: () => mirrorHalf(TREE_HALF),
-  guitar: () => mirrorHalf(GUITAR_HALF),
-  butterfly: () => mirrorHalf(BUTTERFLY_HALF),
+  o: sampleLetterO,
+  j: () => J_FULL,
+  t: () => mirrorHalf(T_HALF),
 };
 
 export const SHAPES = [
   { id: 'heart', name: 'Heart' },
   { id: 'star', name: 'Star' },
   { id: 'tree', name: 'Tree' },
-  { id: 'guitar', name: 'Guitar' },
-  { id: 'butterfly', name: 'Butterfly' },
+  { id: 'o', name: 'O' },
+  { id: 'j', name: 'J' },
+  { id: 't', name: 'T' },
 ];
 
 // Fit raw points into a centered 0..1 box, preserving aspect ratio.
@@ -200,17 +213,16 @@ function prepWaypoints(latlngs, geometricKm) {
   return Array.from({ length: count }, (_, i) => pts[Math.floor(i * stride)]);
 }
 
-async function fitRouteOrs(latlngs) {
-  const geometricKm = polylineDistanceKm(latlngs);
-  const fallback = { latlngs, distanceKm: geometricKm, snapped: false, mode: 'ors' };
-
+// Shared ORS /route call: wps is an open (non-closed) ordered list of [lat,lng]
+// waypoints. Returns { latlngs (closed), distanceKm } on success, or an object
+// with just { error } on failure — callers layer their own fallback shape on top.
+async function callOrsRoute(wps, { radius = SNAP_RADIUS_M } = {}) {
   if (!ORS_API_KEY) {
-    return { ...fallback, error: 'No OpenRouteService API key configured — set VITE_ORS_API_KEY in .env.local.' };
+    return { error: 'No OpenRouteService API key configured — set VITE_ORS_API_KEY in .env.local.' };
   }
 
-  const wps = prepWaypoints(latlngs, geometricKm);
   const coordinates = wps.map(([lat, lng]) => [lng, lat]);
-  const radiuses = wps.map(() => SNAP_RADIUS_M);
+  const radiuses = wps.map(() => radius);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ORS_FETCH_TIMEOUT_MS);
@@ -220,6 +232,126 @@ async function fitRouteOrs(latlngs) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: ORS_API_KEY },
       body: JSON.stringify({ coordinates, preference: 'shortest', radiuses }),
+      signal: controller.signal,
+    });
+    data = await res.json();
+  } catch (err) {
+    return { error: err.name === 'AbortError' ? 'OpenRouteService request timed out.' : 'Could not reach OpenRouteService.' };
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!res.ok || !data.features || !data.features[0]) {
+    return { error: data?.error?.message || `OpenRouteService error (HTTP ${res.status}).` };
+  }
+
+  const feature = data.features[0];
+  const snapped = feature.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+  const closed = snapped.concat([snapped[0]]); // re-close the loop for drawing/GPX
+  const distanceKm = feature.properties.summary.distance / 1000;
+  return { latlngs: closed, distanceKm };
+}
+
+async function fitRouteOrs(latlngs) {
+  const geometricKm = polylineDistanceKm(latlngs);
+  const fallback = { latlngs, distanceKm: geometricKm, snapped: false, mode: 'ors' };
+
+  const wps = prepWaypoints(latlngs, geometricKm);
+  const r = await callOrsRoute(wps);
+  if (r.error) return { ...fallback, error: r.error };
+
+  const ratio = geometricKm > 0 ? r.distanceKm / geometricKm : 1;
+  return { latlngs: r.latlngs, distanceKm: r.distanceKm, snapped: true, mode: 'ors', error: null, ratio };
+}
+
+export async function fitRoute(latlngs, opts = {}) {
+  const mode = opts.mode || 'geometric';
+  if (mode === 'ors') return fitRouteOrs(latlngs);
+  return { latlngs, distanceKm: polylineDistanceKm(latlngs), snapped: false, mode, error: null };
+}
+
+// ---------------------------------------------------------------------------
+// 3c. MANUAL ROUTE EDITING — route through an exact, user-placed waypoint
+// list (drag-to-reshape), no density resampling: the user has already chosen
+// these points deliberately, so route through every one of them in order.
+// ---------------------------------------------------------------------------
+
+// A small, evenly-spaced set of drag handles for manual route editing — not
+// one per road-snapped vertex (there can be hundreds; dragging one among that
+// many is unusably fiddly). latlngs may be closed or open; returns an open list.
+export function resampleWaypoints(latlngs, count = 10) {
+  const isClosed = latlngs.length > 1
+    && latlngs[0][0] === latlngs[latlngs.length - 1][0]
+    && latlngs[0][1] === latlngs[latlngs.length - 1][1];
+  const pts = isClosed ? latlngs.slice(0, -1) : latlngs;
+  const n = Math.max(3, Math.min(count, pts.length));
+  if (n >= pts.length) return pts.slice();
+  const stride = pts.length / n;
+  return Array.from({ length: n }, (_, i) => pts[Math.floor(i * stride)]);
+}
+
+export async function fitRouteFromWaypoints(latlngs) {
+  const isClosed = latlngs.length > 1
+    && latlngs[0][0] === latlngs[latlngs.length - 1][0]
+    && latlngs[0][1] === latlngs[latlngs.length - 1][1];
+  const wps = isClosed ? latlngs.slice(0, -1) : latlngs;
+  const fallback = { latlngs, distanceKm: polylineDistanceKm(latlngs), snapped: false, mode: 'edited' };
+
+  if (wps.length < 2) return { ...fallback, error: 'Need at least two points to route through.' };
+
+  const r = await callOrsRoute(wps, { radius: 80 }); // tight radius — these are deliberate points, don't wander
+  if (r.error) return { ...fallback, error: r.error };
+  return { latlngs: r.latlngs, distanceKm: r.distanceKm, snapped: true, mode: 'edited', error: null };
+}
+
+// ---------------------------------------------------------------------------
+// 3b. LOOP ROUTING — "just give me a nice loop of this length", no shape.
+// Uses ORS's round-trip routing: a single start point + target distance comes
+// back as a real, already-street-snapped loop. Empirically much tighter on
+// distance (~0.85-1.2x target) than shape-mode snapping, since it's purpose-
+// built for this instead of fighting the road network to trace a silhouette.
+// ---------------------------------------------------------------------------
+
+const LOOP_POINTS = 3; // fixed; controls how windy vs. direct the loop is — not user-configurable
+
+function sampleCircle(n = 48) {
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * TAU;
+    pts.push([0.5 * Math.cos(a), 0.5 * Math.sin(a)]);
+  }
+  return pts;
+}
+
+// Plain geometric circle of the target distance — the "free" fallback loop
+// mode has no shape of its own to fall back on independent of the network call.
+export function buildLoopFallback({ center, targetKm }) {
+  const pts = normalize(sampleCircle());
+  return placeShape({ points: pts, center, targetKm, rotationDeg: 0, scale: 1 });
+}
+
+export async function fetchLoopRoute({ center, targetKm, seed = 1, points = LOOP_POINTS } = {}) {
+  const fallbackLatlngs = buildLoopFallback({ center, targetKm });
+  const fallback = { latlngs: fallbackLatlngs, distanceKm: polylineDistanceKm(fallbackLatlngs), snapped: false, mode: 'loop' };
+
+  if (!ORS_API_KEY) {
+    return { ...fallback, error: 'No OpenRouteService API key configured — set VITE_ORS_API_KEY in .env.local.' };
+  }
+
+  const [lat, lng] = center;
+  const body = {
+    coordinates: [[lng, lat]],
+    options: { round_trip: { length: Math.round(targetKm * 1000), points, seed } },
+  };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ORS_FETCH_TIMEOUT_MS);
+  let res, data;
+  try {
+    res = await fetch(ORS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: ORS_API_KEY },
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
     data = await res.json();
@@ -236,18 +368,12 @@ async function fitRouteOrs(latlngs) {
   }
 
   const feature = data.features[0];
-  const snapped = feature.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
-  const closed = snapped.concat([snapped[0]]); // re-close the loop for drawing/GPX
+  // Round-trip geometry comes back already closed (first === last) — unlike
+  // shape mode's snapped response, do not append a closing point again.
+  const latlngs = feature.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
   const distanceKm = feature.properties.summary.distance / 1000;
-  const ratio = geometricKm > 0 ? distanceKm / geometricKm : 1;
 
-  return { latlngs: closed, distanceKm, snapped: true, mode: 'ors', error: null, ratio };
-}
-
-export async function fitRoute(latlngs, opts = {}) {
-  const mode = opts.mode || 'geometric';
-  if (mode === 'ors') return fitRouteOrs(latlngs);
-  return { latlngs, distanceKm: polylineDistanceKm(latlngs), snapped: false, mode, error: null };
+  return { latlngs, distanceKm, snapped: true, mode: 'loop', error: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -294,4 +420,14 @@ export function toSvgPath(points, size = 100, pad = 12) {
   const d = points.map(([x, y], i) =>
     `${i === 0 ? 'M' : 'L'}${(pad + x * s).toFixed(1)},${(pad + (1 - y) * s).toFixed(1)}`).join(' ');
   return d + ' Z';
+}
+
+// Preview path for an arbitrary lat/lng route (a loop, or a saved route of
+// either mode) rather than a normalized 0..1 shape — projects to local meters
+// (equirectangular, fine at preview scale) then reuses the same normalize+path pipeline.
+export function toSvgPathFromLatLngs(latlngs, size = 100, pad = 12) {
+  const avgLat = latlngs.reduce((sum, [lat]) => sum + lat, 0) / latlngs.length;
+  const mPerLat = 111320, mPerLng = 111320 * Math.cos(avgLat * Math.PI / 180);
+  const xy = latlngs.map(([lat, lng]) => [lng * mPerLng, lat * mPerLat]);
+  return toSvgPath(normalize(xy), size, pad);
 }

@@ -1,31 +1,28 @@
-# React + Vite
+# RouteArt
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+A lightweight route planner. Pick a start, a target distance, and either **Loop** (a real, street-snapped loop near your start — no shape required) or **Shape** (draw a route in the outline of a heart, star, or anything you describe). Export as GPX, or save it locally to revisit later.
 
-Currently, two official plugins are available:
+## Running locally
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Two dev servers are involved because the app has one small serverless function:
 
-## React Compiler
+- `npm run dev` — plain Vite dev server. Works for everything except the AI shape generator (`/api/generate-shape` isn't served).
+- `vercel dev` — wraps the Vite dev server **and** serves the `api/` folder, so the AI generator works too. This is what you want for full local testing.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+npm install
+npx vercel dev
+```
 
-## Expanding the Oxlint configuration
+(`vercel dev` reads the same `.env.local` as Vite — `VITE_`-prefixed vars are exposed to the browser bundle as usual; unprefixed vars like `ANTHROPIC_API_KEY` stay server-side, readable only by functions under `api/`.)
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+## Environment variables
 
-## Road snapping (OpenRouteService)
+Copy `.env.example` to `.env.local` and fill in:
 
-Routes can snap to real roads instead of drawing straight lines, anywhere with OSM coverage — not limited to any one city. This runs against the [OpenRouteService](https://openrouteservice.org/) directions API (foot-walking profile).
+- **`VITE_ORS_API_KEY`** — free key from [openrouteservice.org/dev](https://openrouteservice.org/dev/#/signup) (Dashboard → request a token for "Directions"). Powers both Loop mode's round-trip routing and Shape mode's road-snapping. If missing, expired, or a request fails, the app falls back to a geometric preview with a status message — nothing else breaks.
+- **`ANTHROPIC_API_KEY`** — server-only key from the [Anthropic Console](https://console.anthropic.com/settings/keys), used by `api/generate-shape.js` for "…or describe anything" in Shape mode. In production, set this in your hosting provider's environment variable settings (not in a file that gets deployed). If missing or the call fails, that feature falls back to a procedural abstract-shape generator with a status message.
 
-**Setup:**
+## Deploying
 
-1. Sign up for a free API key at [openrouteservice.org/dev](https://openrouteservice.org/dev/#/signup) → Dashboard → request a token for the "Directions" service.
-2. Create `.env.local` in the project root (see `.env.example`):
-   ```
-   VITE_ORS_API_KEY=your-key-here
-   ```
-3. `npm run dev` as normal.
-
-If no key is set, the API call fails, or a request times out, the app falls back to the geometric (straight-line) preview with a status message — nothing else breaks.
+Built for [Vercel](https://vercel.com/) — it auto-detects the Vite static build and deploys `api/generate-shape.js` as a serverless function alongside it. Set both env vars above in the Vercel project's Environment Variables settings before deploying.
