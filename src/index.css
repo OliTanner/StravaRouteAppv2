@@ -90,8 +90,16 @@ input[type=range].ra-range--chalk::-moz-range-thumb { background: var(--chalk); 
 }
 
 .leaflet-container { font-family: 'Barlow', sans-serif; background: var(--ink-950); }
-.leaflet-control-zoom a { background: var(--ink-900) !important; color: var(--paper-dim) !important; border-color: var(--line) !important; }
-.leaflet-control-zoom a:hover { background: var(--ink-800) !important; color: var(--turf) !important; }
+.leaflet-control-zoom {
+  border: none !important; margin: 0 0 76px 14px !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .5) !important;
+}
+.leaflet-control-zoom a {
+  background: var(--ink-800) !important; color: var(--paper) !important;
+  border: 1px solid rgba(243, 242, 236, .22) !important; width: 36px !important; height: 36px !important;
+  line-height: 34px !important; font-size: 18px !important;
+}
+.leaflet-control-zoom a:hover { background: var(--ink-900) !important; color: var(--turf) !important; }
 .leaflet-control-attribution { background: rgba(13, 15, 11, .7) !important; color: var(--paper-faint) !important; }
 .leaflet-control-attribution a { color: var(--paper-dim) !important; }
 
@@ -160,23 +168,43 @@ input[type=range].ra-range--chalk::-moz-range-thumb { background: var(--chalk); 
 .ra-hud-chip span { font-size: 11px; color: var(--paper-dim); font-weight: 500; font-family: 'Barlow', sans-serif; }
 .ra-hud-chip--muted { font-family: 'Barlow', sans-serif; font-weight: 500; font-size: 12px; color: var(--paper-dim); }
 
+.ra-location-wrap { position: relative; pointer-events: auto; }
+.ra-location-chip {
+  border: 1px solid var(--line); cursor: pointer; font-family: 'Barlow', sans-serif;
+  max-width: 46vw;
+}
+.ra-location-chip:hover { border-color: rgba(47, 216, 151, .5); }
+.ra-location-name {
+  font-size: 13px !important; color: var(--paper) !important; font-weight: 600 !important;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw;
+}
+.ra-location-chevron { font-size: 11px !important; color: var(--paper-faint) !important; }
+.ra-location-popover {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 560; width: 280px; max-width: 80vw;
+  background: rgba(13, 15, 11, .95); backdrop-filter: blur(16px); border: 1px solid var(--line);
+  border-radius: 14px; padding: 14px; box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+}
+.ra-location-hint { margin-top: 10px; font-size: 11.5px; color: var(--paper-faint); line-height: 1.4; }
+
 /* ---------------------------------------------------------------------- */
 /* Control strip — mode + distance, always visible, no tap required       */
 /* ---------------------------------------------------------------------- */
 
 .ra-control-strip {
   position: fixed; top: 106px; left: 14px; right: 14px; z-index: 550;
-  margin: 0 auto; width: 100%; max-width: 520px;
+  margin: 0 auto; max-width: 520px;
   display: flex; align-items: center; gap: 10px;
   background: rgba(13, 15, 11, .72); backdrop-filter: blur(10px); border: 1px solid var(--line);
   border-radius: 16px; padding: 8px 8px 8px 10px;
 }
 .ra-mode-toggle { flex: 1; display: flex; background: var(--ink-800); border-radius: 10px; padding: 3px; gap: 2px; min-width: 0; }
 .ra-mode-btn {
-  flex: 1; border: none; background: transparent; color: var(--paper-dim); font-weight: 600; font-size: 12.5px;
+  flex: 1; border: none; background: transparent; color: var(--paper); font-weight: 600; font-size: 12.5px;
   padding: 7px 6px; border-radius: 8px; cursor: pointer; transition: background .15s, color .15s; white-space: nowrap;
+  opacity: .7;
 }
-.ra-mode-btn--selected { background: var(--turf); color: var(--turf-ink); }
+.ra-mode-btn:hover { opacity: 1; }
+.ra-mode-btn--selected { background: var(--turf); color: var(--turf-ink); opacity: 1; }
 
 .ra-distance-stepper {
   flex: none; display: flex; align-items: center; gap: 8px;
@@ -200,6 +228,12 @@ input[type=range].ra-range--chalk::-moz-range-thumb { background: var(--chalk); 
 
 @media (max-width: 560px) {
   .ra-control-strip { top: 100px; flex-wrap: wrap; }
+  /* mode toggle takes its own full row so the stepper + export button on the
+     second row always have room, instead of the export button clipping off
+     the edge when all three fight for one row. */
+  .ra-mode-toggle { flex: 1 1 100%; order: 1; }
+  .ra-distance-stepper { order: 2; flex: 1; justify-content: center; }
+  .ra-quick-export { order: 3; }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -220,7 +254,12 @@ input[type=range].ra-range--chalk::-moz-range-thumb { background: var(--chalk); 
   border-radius: 12px; padding: 9px 14px !important; margin: 0;
 }
 
-.ra-result-cards { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
+.ra-result-cards {
+  display: flex; gap: 10px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none;
+  /* fades the right edge so a cut-off card reads as "more to scroll", not a layout bug */
+  mask-image: linear-gradient(to right, black calc(100% - 28px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 28px), transparent 100%);
+}
 .ra-result-cards::-webkit-scrollbar { display: none; }
 
 .ra-result-card {
@@ -331,9 +370,7 @@ input[type=range].ra-range--chalk::-moz-range-thumb { background: var(--chalk); 
 .ra-result-row:last-child { border-bottom: none; }
 .ra-result-row:hover { background: var(--ink-900); color: var(--turf); }
 
-.ra-current-location { margin-top: 11px; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--paper-dim); }
 .ra-current-location-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--turf); box-shadow: 0 0 8px rgba(47, 216, 151, .7); flex: none; }
-.ra-current-location-name { font-weight: 500; color: var(--paper); }
 
 .ra-value-row { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 10px; }
 .ra-value { font-weight: 600; font-size: 27px; line-height: .85; color: var(--paper); }

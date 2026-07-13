@@ -54,6 +54,7 @@ export default class App extends Component {
     suggestedCenter: null, // { center, offsetM } — the scouted center results are drawn from
     suggestedActiveIndex: 0, // which card is currently previewed on the map
     searchRadiusKm: 1.5,
+    locationSearchOpen: false,
     savedRoutesOpen: false,
     sheetExpanded: false,
     savedRoutes: savedRoutesStore.loadSavedRoutes(),
@@ -323,11 +324,15 @@ export default class App extends Component {
   ensureMap() {
     if (this.map || !this.mapEl) return;
     const { lat, lng } = this.state.location;
-    this.map = L.map(this.mapEl, { zoomControl: true, attributionControl: true }).setView([lat, lng], 15);
+    // zoomControl off here, added explicitly below at bottomleft — the default
+    // topleft position sits underneath the topbar/control-strip, where a dark
+    // control on a dark translucent header is nearly invisible.
+    this.map = L.map(this.mapEl, { zoomControl: false, attributionControl: true }).setView([lat, lng], 15);
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
       maxZoom: 19, subdomains: 'abcd',
       attribution: '&copy; OpenStreetMap &copy; CARTO',
     }).addTo(this.map);
+    L.control.zoom({ position: 'bottomleft' }).addTo(this.map);
     this.waypointMarkers = [];
     setTimeout(() => this.map && this.map.invalidateSize(), 200);
   }
@@ -469,7 +474,7 @@ export default class App extends Component {
     this._recenterNext = true;
     this._locationTouchedByUser = true;
     const short = r.label.split(',').slice(0, 2).join(',');
-    this.setState({ location: { name: short, lat: r.lat, lng: r.lng }, results: [], query: short, loadedRoute: null, editedRoute: null });
+    this.setState({ location: { name: short, lat: r.lat, lng: r.lng }, results: [], query: short, loadedRoute: null, editedRoute: null, locationSearchOpen: false });
     if (this.map) this.map.setView([r.lat, r.lng], 14);
   }
 
@@ -742,7 +747,41 @@ export default class App extends Component {
         </header>
 
         <div className="ra-hud-row">
-          <div className="ra-hud-chip ra-hud-chip--muted">Drag the pin to reposition</div>
+          <div className="ra-location-wrap">
+            <button
+              type="button"
+              className="ra-hud-chip ra-location-chip"
+              onClick={() => this.setState((s2) => ({ locationSearchOpen: !s2.locationSearchOpen }))}
+            >
+              <span className="ra-current-location-dot"></span>
+              <span className="ra-location-name">{s.location.name}</span>
+              <span className="ra-location-chevron">⌄</span>
+            </button>
+            {s.locationSearchOpen && (
+              <div className="ra-location-popover">
+                <form className="ra-row" onSubmit={(e) => this.doSearch(e)}>
+                  <input
+                    className="ra-input" autoFocus value={s.query}
+                    onChange={(e) => this.setState({ query: e.target.value })}
+                    placeholder="Search a city or address"
+                  />
+                  <button type="submit" className="ra-icon-btn">
+                    {s.searching ? <span className="ra-spin ra-spin-lt"></span> : <span>→</span>}
+                  </button>
+                </form>
+                {s.results.length > 0 && (
+                  <div className="ra-results">
+                    {s.results.map((r, i) => (
+                      <div key={i} className="ra-result-row" onClick={() => this.pickResult(r)}>
+                        {r.label.split(',').slice(0, 3).join(', ')}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="ra-location-hint">Or drag the pin on the map to reposition.</div>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Always-visible chrome: mode + distance. No tap required to see or use these. */}
@@ -895,30 +934,6 @@ export default class App extends Component {
                   </button>
                   <button type="button" className="ra-btn ra-btn-ghost ra-export-secondary" onClick={() => this.saveCurrentRoute()}>Save Route</button>
                   <div className="ra-export-note">Load the GPX into Strava, Garmin or Komoot to run it for real.</div>
-                </div>
-              </div>
-
-              {/* Start */}
-              <div className="ra-sheet-section">
-                <div className="ra-field-label">Start &amp; finish</div>
-                <form className="ra-row" onSubmit={(e) => this.doSearch(e)}>
-                  <input className="ra-input" value={s.query} onChange={(e) => this.setState({ query: e.target.value })} placeholder="Search a city or address" />
-                  <button type="submit" className="ra-icon-btn">
-                    {s.searching ? <span className="ra-spin ra-spin-lt"></span> : <span>→</span>}
-                  </button>
-                </form>
-                {s.results.length > 0 && (
-                  <div className="ra-results">
-                    {s.results.map((r, i) => (
-                      <div key={i} className="ra-result-row" onClick={() => this.pickResult(r)}>
-                        {r.label.split(',').slice(0, 3).join(', ')}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <div className="ra-current-location">
-                  <div className="ra-current-location-dot"></div>
-                  <span className="ra-current-location-name">{s.location.name}</span>
                 </div>
               </div>
 
